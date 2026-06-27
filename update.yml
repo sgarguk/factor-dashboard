@@ -1,0 +1,37 @@
+name: Update Factor Dashboard
+
+on:
+  schedule:
+    - cron: '0 22 * * 1-5'   # 22:00 UTC Mon–Fri  (US market close + buffer)
+  workflow_dispatch:            # manual "Run workflow" button in GitHub UI
+
+permissions:
+  contents: write               # allow the job to git push
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate dashboards
+        run: python generate.py
+
+      - name: Commit and push updated HTML
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add index.html 5etf.html
+          git diff --staged --quiet \
+            || git commit -m "Auto-update: $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git push
