@@ -12,6 +12,8 @@ from itertools import combinations
 import json
 from datetime import datetime
 import warnings; warnings.filterwarnings('ignore')
+import tempfile
+yf.set_tz_cache_location(tempfile.mkdtemp())
 
 N, SHIFT  = 30, 1
 BENCHMARK = 'SPY'
@@ -58,6 +60,9 @@ def run(univ):
     prices= raw['Close'].dropna()
     fp    = prices[TICKERS]
     spy   = prices[BENCHMARK]
+    if fp.empty:
+        print(f"ERROR: price data empty — download failed, skipping this universe.")
+        return
     latest= fp.index[-1]
     print(f"  Data through: {latest.date()}")
 
