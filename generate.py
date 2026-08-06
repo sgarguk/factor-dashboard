@@ -191,6 +191,31 @@ def run(univ):
 
     curr_votes = {t: int(votes_df.loc[latest, t]) for t in TICKERS}
 
+    # ── Signal pipeline state ─────────────────────────────────────────────
+    prev_winner   = winner_s.iloc[-2] if len(winner_s) >= 2 else None
+    switched_today = (curr_winner is not None and
+                      prev_winner is not None and
+                      str(curr_winner) != str(prev_winner))
+
+    votes_sorted  = sorted(curr_votes.items(), key=lambda x: -x[1])
+    challenger_t  = votes_sorted[1][0] if len(votes_sorted) > 1 else None
+    challenger_v  = votes_sorted[1][1] if len(votes_sorted) > 1 else 0
+    vote_gap      = curr_votes.get(curr_winner, 0) - challenger_v
+
+    # Pairs in-band but close to flipping their latch (within 15% of boundary)
+    near_flip = []
+    for key, ps in pair_states.items():
+        if ps['status'] != 'IN BAND':
+            continue
+        pct = ps['pct']
+        if ps['lat'] == 1 and pct < 15:       # latching A, but near lower → B could gain
+            near_flip.append(dict(key=key, loses=ps['A'], gains=ps['B'],
+                                  pct=pct, urgency=pct))
+        elif ps['lat'] == -1 and pct > 85:     # latching B, but near upper → A could gain
+            near_flip.append(dict(key=key, loses=ps['B'], gains=ps['A'],
+                                  pct=pct, urgency=100-pct))
+    near_flip.sort(key=lambda x: x['urgency'])  # most urgent first
+
     P = dict(
         label=univ['label'], tickers=TICKERS, n_pairs=len(PAIRS),
         pairs=[f"{A}/{B}" for A,B in PAIRS],
@@ -210,7 +235,16 @@ def run(univ):
         annual_s=annual_s, annual_b=annual_b,
         switches=[dict(date=s['date'],from_=s['from_'],to=s['to']) for s in switches[-20:]],
         full_lbl=full_lbl, full_s=full_s, full_b=full_b, full_f=full_f,
-        ratio_charts=ratio_charts)
+        ratio_charts=ratio_charts,
+        pipeline=dict(
+            switched_today=switched_today,
+            prev_winner=str(prev_winner) if prev_winner else None,
+            challenger_t=challenger_t,
+            challenger_v=challenger_v,
+            vote_gap=vote_gap,
+            near_flip=near_flip,
+            action_date=latest.strftime('%d %b %Y') if switched_today else None,
+        ))
 
     html = build_html(P)
     with open(univ['fname'], 'w') as f: f.write(html)
@@ -319,6 +353,87 @@ def build_html(P):
     sig_logic=(f"Winner: <strong style='color:{W_COL}'>{W} — {W_NAM} "
                f"({P['curr_votes'].get(W,0)}/{P['max_votes']} votes)</strong> &nbsp;·&nbsp; "
                f"Each ratio votes for the ETF breaking above its 30-day Donchian high (latches until broken down).")
+
+    # ── Signal pipeline card ──────────────────────────────────────────────
+    pipe = P['pipeline']
+
+    if pipe['switched_today']:
+        pw  = pipe['prev_winner']
+        pw_col = META.get(pw, {}).get('color', '#666') if pw else '#666'
+        badge   = "<span style='background:#D5F5E3;color:#1E8449;padding:3px 9px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:.5px'>⚡ SWITCH TODAY</span>"
+        action  = (f"Exiting &nbsp;<strong style='color:{pw_col}'>{pw}</strong>"
+                   f"&nbsp; → &nbsp;<strong style='color:{W_COL}'>{W} — {W_NAM}</strong><br>"
+                   f"<span style='font-size:9px;color:#7F8C8D'>Effective: {P['curr_date']} &nbsp;·&nbsp; Execute at close</span>")
+    elif pipe['vote_gap'] <= 1:
+        cc      = pipe['challenger_t']; cc_col = META.get(cc,{}).get('color','#666') if cc else '#666'
+        badge   = "<span style='background:#FEF9E7;color:#9A7D0A;padding:3px 9px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:.5px'>⚠ MONITORING</span>"
+        action  = (f"<strong style='color:{W_COL}'>{W}</strong> leads by {pipe['vote_gap']} vote"
+                   f" &nbsp;·&nbsp; <strong style='color:{cc_col}'>{cc}</strong>"
+                   f" ({pipe['challenger_v']}/{P['max_votes']}) within striking range<br>"
+                   f"<span style='font-size:9px;color:#7F8C8D'>Hold {W} · reassess on any pair flip</span>")
+    else:
+        cc      = pipe['challenger_t']; cc_col = META.get(cc,{}).get('color','#666') if cc else '#666'
+        badge   = "<span style='background:#EBF5FB;color:#1A5276;padding:3px 9px;border-radius:3px;font-size:10px;font-weight:700;letter-spacing:.5px'>✓ STABLE</span>"
+        action  = (f"Hold &nbsp;<strong style='color:{W_COL}'>{W} — {W_NAM}</strong>"
+                   f"&nbsp;·&nbsp; Gap: {pipe['vote_gap']} votes vs"
+                   f" <strong style='color:{cc_col}'>{cc}</strong> ({pipe['challenger_v']}/{P['max_votes']})<br>"
+                   f"<span style='font-size:9px;color:#7F8C8D'>No action required</span>")
+
+    # Near-flip pairs (max 4 shown)
+    nf_html = ''
+    if pipe['near_flip']:
+        items = ''
+        for nf in pipe['near_flip'][:4]:
+            gl_col  = META.get(nf['gains'],{}).get('color','#666')
+            lo_col  = META.get(nf['loses'],{}).get('color','#666')
+            arrow   = '▼' if nf['pct'] < 50 else '▲'
+            warn    = ' style="font-weight:700"' if nf['gains'] == W else ''
+            items  += (f"<div style='font-family:Courier New,monospace;font-size:9px;"
+                       f"padding:3px 7px;border-radius:3px;border:1px solid {gl_col}33;"
+                       f"background:{gl_col}0D'>"
+                       f"<span style='color:{lo_col}'>{nf['loses']}</span>"
+                       f" {arrow} <strong style='color:{gl_col}'{warn}>{nf['gains']}</strong>"
+                       f" &nbsp;<span style='color:#94a3b8'>{nf['key']} · {nf['pct']}%</span></div>")
+        nf_html = (f"<div style='margin-top:8px;border-top:1px solid var(--bd);padding-top:7px'>"
+                   f"<div style='font-size:8px;color:#7F8C8D;text-transform:uppercase;letter-spacing:.6px;margin-bottom:5px'>"
+                   f"Pairs near boundary &nbsp;·&nbsp; <span style='text-transform:none;font-style:italic'>vote could shift</span></div>"
+                   f"<div style='display:flex;gap:5px;flex-wrap:wrap'>{items}</div></div>")
+
+    # Vote spread mini bars
+    vote_bars = ''
+    for t in sorted(T, key=lambda x: -P['curr_votes'][x]):
+        v   = P['curr_votes'][t]; col = META[t]['color']
+        pct = int(v / P['max_votes'] * 100)
+        bld = ' font-weight:700;' if t == W else ''
+        vote_bars += (f"<div style='display:flex;align-items:center;gap:6px;margin-bottom:4px'>"
+                      f"<span style='font-family:Courier New,monospace;font-size:10px;{bld}color:{col};min-width:38px'>{t}</span>"
+                      f"<div style='flex:1;height:7px;background:#F0F4F8;border-radius:2px'>"
+                      f"<div style='width:{pct}%;height:100%;background:{col};border-radius:2px'></div></div>"
+                      f"<span style='font-size:10px;color:#475569;min-width:14px;text-align:right'>{v}</span></div>")
+
+    pipe_card = f"""<div class="card" style="margin-bottom:13px">
+  <div class="ch">
+    <span>Signal Pipeline</span>
+    <span>N={N} · Shift={SHIFT} · Pairwise ratio Donchian · Latching · No confirmation window</span>
+  </div>
+  <div class="cb" style="display:grid;grid-template-columns:240px 1fr 180px;gap:0;padding:0">
+    <div style="padding:13px 16px;border-right:1px solid var(--bd)">
+      <div style="margin-bottom:8px">{badge}</div>
+      <div style="font-size:11px;line-height:1.5;color:var(--nv)">{action}</div>
+    </div>
+    <div style="padding:13px 18px;border-right:1px solid var(--bd)">
+      <div style="font-size:8px;color:#7F8C8D;text-transform:uppercase;letter-spacing:.6px;margin-bottom:5px">Current Regime</div>
+      <div style="font-size:22px;font-weight:700;font-family:'Courier New',monospace;color:{W_COL};line-height:1">{W}</div>
+      <div style="font-size:10px;color:#475569;margin:3px 0">{W_NAM} &nbsp;·&nbsp; {P['curr_votes'].get(W,0)}/{P['max_votes']} votes &nbsp;·&nbsp; {P['days_in']} days</div>
+      <div style="font-size:9px;color:#7F8C8D">since {P['since_str']} &nbsp;·&nbsp; prev: {P['prev_hold']}</div>
+      {nf_html}
+    </div>
+    <div style="padding:13px 14px">
+      <div style="font-size:8px;color:#7F8C8D;text-transform:uppercase;letter-spacing:.6px;margin-bottom:7px">Vote Spread</div>
+      {vote_bars}
+    </div>
+  </div>
+</div>"""
 
     # Nav link (cross-link between the two dashboards)
     other_link = '5etf.html' if P['n_pairs'] > 10 else 'index.html'
@@ -465,6 +580,7 @@ canvas{{max-width:100%;}}
     </div>
   </div>
 </div>
+{pipe_card}
 <div class="card" style="margin-bottom:13px">
   <div class="ch"><span>Cumulative Returns — Full Period (rebased 100)</span><span>Rotation vs Individual Factors vs SPY B&amp;H</span></div>
   <div class="cb"><div style="height:220px;position:relative"><canvas id="fullChart"></canvas></div></div>
